@@ -1,5 +1,6 @@
 /*
  * Tiny HTTP REST API mirroring the UART CLI:
+ *   GET  /status                    — LOCAL EDIT (2026-08-24): health snapshot
  *   GET  /lights
  *   POST /lights/<key>/on
  *   POST /lights/<key>/off

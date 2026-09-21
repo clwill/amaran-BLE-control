@@ -49,8 +49,16 @@ static const char *TAG = "amaran_node";
 #define UART_BUF_SIZE 256
 
 /* This node's unicast address. Existing fixtures are at 2/4/6; pick
- * something well outside that range. */
-#define ESP32_UNICAST_ADDR 0x0010
+ * something well outside that range.
+ *
+ * LOCAL CHANGE (2026-08-07): upstream's 0x0010 assumes low fixture addresses.
+ * On this mesh the amaran app assigned 0x000c-0x001c, so 0x0010 collided with
+ * key_right (amaran 100d). Symptom: key_right never returned a STATUS message
+ * while every other fixture did — the ESP32 was answering for its address.
+ * 0x00f0 is clear of the block with room to spare. RE-APPLY AFTER ANY UPSTREAM
+ * PULL, and note that changing this requires `idf.py erase-flash` because the
+ * old address persists in NVS. */
+#define ESP32_UNICAST_ADDR 0x00f0
 #define APP_KEY_INDEX      0x0000
 #define NET_KEY_INDEX      0x0000
 #define DEFAULT_TTL        7
@@ -242,6 +250,14 @@ static void custom_model_cb(esp_ble_mesh_model_cb_event_t event,
                            param->model_operation.length);
         break;
     case ESP_BLE_MESH_MODEL_SEND_COMP_EVT:
+        /* LOCAL EDIT #8 (2026-09-06): a send that the stack ACCEPTED but never
+         * completed means the BT controller is wedged, which looks identical
+         * from the receive side to a mesh that simply stopped answering. */
+        /* LOCAL EDIT #10: also pass the destination (ctx may be NULL). */
+        amaran_mqtt_note_mesh_send_comp((int)param->model_send_comp.err_code,
+                                        param->model_send_comp.ctx
+                                            ? param->model_send_comp.ctx->addr
+                                            : 0);
         if (param->model_send_comp.err_code) {
             ESP_LOGE(TAG, "model send err=%d opcode=0x%06" PRIx32,
                      param->model_send_comp.err_code,
@@ -364,15 +380,75 @@ static void disp_refresh(uint16_t dst)
  * we pick up changes made from the desktop / iOS app and reflect them in
  * Home Assistant. Replies arrive in custom_model_cb. */
 #define POLL_INTERVAL_MS 12000
+
+/* LOCAL EDIT (2026-08-24) — mesh liveness watch.
+ *
+ * This sweep already asks all seven fixtures for status every 12 s, so it
+ * already knows whether the mesh works -- it just threw the answer away. On
+ * 2026-08-24 the mesh went completely deaf while Wi-Fi and MQTT stayed
+ * healthy: HA kept showing responsive-looking lights, every command was
+ * accepted and echoed, and nothing was logged for hours. The existing
+ * verify-and-retry (2026-08-13) cannot catch this because it only runs when a
+ * status reply CONTRADICTS a command -- with zero replies it never arms.
+ *
+ * So: count replies across each sweep. Zero replies from ANY fixture for
+ * MESH_SILENT_SWEEPS_OFFLINE consecutive sweeps means the mesh is gone, and
+ * every light goes unavailable in HA instead of lying.
+ *
+ * 5 sweeps (~60 s) is deliberately generous -- a single sweep can legitimately
+ * come back empty under adv-channel contention, and a false "unavailable"
+ * flicker mid-shoot would be worse than the delay.
+ *
+ * Note this also (correctly) reports unavailable when the fixtures are
+ * physically unpowered: the bridge genuinely cannot control them, and saying
+ * so is the honest answer. */
+#define MESH_SILENT_SWEEPS_OFFLINE 5
+#define DIAG_PUBLISH_EVERY_SWEEPS  5    /* ~60 s between diagnostic publishes */
+
 static void poll_task(void *arg)
 {
+    uint32_t silent_sweeps = 0;
+    uint32_t sweep = 0;
+
     /* Let the mesh + wifi settle before first poll. */
     vTaskDelay(pdMS_TO_TICKS(8000));
     while (1) {
+        uint32_t replies_before = amaran_mqtt_mesh_reply_count();
+        bool polled = false;
+
         if (bt_mesh_is_provisioned()) {
             disp_refresh(AMARAN_GROUP_ALL);
+            polled = true;
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+
+        /* Per-fixture liveness is time-based, so it can be evaluated every
+         * sweep regardless -- the fixtures are on separate outlets and one
+         * going dark is the common case, not mesh death. */
+        amaran_mqtt_update_fixture_availability();
+
+        /* Only judge the mesh as a whole on sweeps we actually sent. */
+        if (polled) {
+            if (amaran_mqtt_mesh_reply_count() == replies_before) {
+                if (silent_sweeps < MESH_SILENT_SWEEPS_OFFLINE) silent_sweeps++;
+                if (silent_sweeps >= MESH_SILENT_SWEEPS_OFFLINE) {
+                    amaran_mqtt_set_mesh_alive(false);  /* edge-logged */
+                }
+            } else {
+                silent_sweeps = 0;
+                amaran_mqtt_set_mesh_alive(true);       /* edge-logged */
+            }
+        }
+
+        if (++sweep % DIAG_PUBLISH_EVERY_SWEEPS == 0) {
+            /* Restate availability alongside the diagnostics. set_mesh_alive()
+             * only publishes on a transition, so a retained value that ever
+             * drifted (a stray publish, a broker restored from an old db)
+             * would otherwise stick forever and leave the entities
+             * unavailable against a healthy bridge. */
+            amaran_mqtt_republish_availability();
+            amaran_mqtt_publish_diag();
+        }
     }
 }
 
@@ -431,6 +507,10 @@ static int send_telink_to(uint16_t dst, const uint8_t payload[10])
                                                        10, (uint8_t *)payload);
     ESP_LOGI(TAG, "send opcode=0x%06x dst=0x%04x app_idx=0x%03x net_idx=0x%03x len=10 err=%d",
              VND_OPCODE_SEND, dst, APP_KEY_INDEX, NET_KEY_INDEX, err);
+    /* LOCAL EDIT #8 (2026-09-06): the return code used to be tested and
+     * thrown away. It is half of the deaf-vs-mute discriminator -- see the
+     * note in mqtt.h. */
+    amaran_mqtt_note_mesh_tx((int)err);
     if (err != ESP_OK) {
         return -1;
     }
@@ -650,7 +730,9 @@ void app_main(void)
     esp_timer_create(&refresh_args, &s_refresh_timer);
 
     xTaskCreate(uart_task, "uart_cli", 4096, NULL, 5, NULL);
-    xTaskCreate(poll_task, "amaran_poll", 3072, NULL, 4, NULL);
+    /* LOCAL EDIT (2026-08-24): 3072 -> 4096. The sweep now also drives the
+     * diagnostic publish, which formats JSON. */
+    xTaskCreate(poll_task, "amaran_poll", 4096, NULL, 4, NULL);
 
     /* Bring up Wi-Fi; MQTT + HTTP start from the got-IP callback. Wi-Fi
      * coexists with BLE on the same chip via the software-coex layer

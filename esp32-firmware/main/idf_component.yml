@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.0"
+  # mDNS left the core components in IDF 5.x; pulled from the registry so the
+  # bridge can advertise amaran-bridge.local. See LOCAL EDIT #7 in wifi.c.
+  espressif/mdns: "^1.2.0"

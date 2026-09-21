@@ -23,6 +23,7 @@ idf_component_register(
         esp_timer
         esp_wifi
         esp_netif
+        mdns
         mqtt
         esp_http_server
         json
