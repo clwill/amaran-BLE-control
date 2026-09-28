@@ -147,6 +147,18 @@ const char *amaran_bt_controller_status_name(void);
  * for real. Self-clearing on expiry AND on reboot, so a failed test cannot
  * leave the bridge wedged. */
 void amaran_mqtt_simulate_deaf(int seconds);
+
+/* LOCAL EDIT #11 (2026-09-28) -- adv buffer alloc race, A/B switch.
+ *
+ * Incident 6 showed the 60-buffer adv pool's free count falling ~10/day to 0
+ * (-> -ENOBUFS -> mesh mute). Suspected cause: ESP-IDF v5.3.2 net_buf_alloc()
+ * lets two tasks claim the same buffer (fixed upstream by 87c0b28459, backported
+ * as patches/0002 behind this switch). Diag adds adv_buf_ref0 (buffers with
+ * ref==0, counted directly) and adv_buf_ghost = ref0 - adv_buf_free: a growing
+ * ghost count with the lock OFF proves the race; a flat one with it ON proves
+ * the fix. Persisted in NVS so recovery reboots don't reset the experiment. */
+void amaran_adv_lock_set(bool on);
+bool amaran_adv_lock_get(void);
 int  amaran_mqtt_simulated_deaf_remaining_s(void);
 
 void amaran_mqtt_note_mesh_tx(int err);

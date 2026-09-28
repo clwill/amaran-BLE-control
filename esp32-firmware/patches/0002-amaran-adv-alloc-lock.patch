@@ -1,0 +1,56 @@
+diff --git a/components/bt/esp_ble_mesh/core/adv.c b/components/bt/esp_ble_mesh/core/adv.c
+index 79932a0582..5ea1ffb7d9 100644
+--- a/components/bt/esp_ble_mesh/core/adv.c
++++ b/components/bt/esp_ble_mesh/core/adv.c
+@@ -59,6 +59,17 @@ struct bt_mesh_queue {
+ };
+ 
+ static struct bt_mesh_queue adv_queue;
++
++/* AMARAN (bridge edit #11, 2026-09-28): backport of upstream 87c0b28459
++ * "add adv lock to avoid allocated buffers" (release/v5.3, first in v5.3.5).
++ * net_buf_alloc() picks a ref==0 buffer under bt_mesh_buf_lock() but sets
++ * ref=1 and decrements the pool counters AFTER dropping it, so two tasks
++ * allocating at once can claim the same buffer; the second unref is then
++ * swallowed by the "!buf->ref" guard and the pool's free count drops by one
++ * for good. Gated by a runtime switch so the fix can be A/B tested on the
++ * bridge without a reflash; the firmware sets it from NVS at boot. */
++static bt_mesh_mutex_t adv_buf_alloc_lock;
++volatile bool amaran_adv_alloc_lock_on = false;
+ /* We reserve one queue item for bt_mesh_adv_update() */
+ #if CONFIG_BLE_MESH_SUPPORT_BLE_ADV
+ #define BLE_MESH_ADV_QUEUE_SIZE     (CONFIG_BLE_MESH_ADV_BUF_COUNT + CONFIG_BLE_MESH_BLE_ADV_BUF_COUNT + 1)
+@@ -376,8 +387,15 @@ struct net_buf *bt_mesh_adv_create_from_pool(struct net_buf_pool *pool,
+         return NULL;
+     }
+ 
++    bool locked = amaran_adv_alloc_lock_on;
++    if (locked) {
++        bt_mesh_r_mutex_lock(&adv_buf_alloc_lock);
++    }
+     buf = net_buf_alloc(pool, timeout);
+     if (!buf) {
++        if (locked) {
++            bt_mesh_r_mutex_unlock(&adv_buf_alloc_lock);
++        }
+         return NULL;
+     }
+ 
+@@ -391,6 +409,9 @@ struct net_buf *bt_mesh_adv_create_from_pool(struct net_buf_pool *pool,
+ 
+     adv->type = type;
+ 
++    if (locked) {
++        bt_mesh_r_mutex_unlock(&adv_buf_alloc_lock);
++    }
+     return buf;
+ }
+ 
+@@ -670,6 +691,7 @@ void bt_mesh_adv_init(void)
+     __ASSERT(ret == pdTRUE, "Failed to create adv thread");
+     (void)ret;
+ #endif /* CONFIG_BLE_MESH_FREERTOS_STATIC_ALLOC_EXTERNAL && (CONFIG_SPIRAM_CACHE_WORKAROUND || !CONFIG_IDF_TARGET_ESP32) && CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY */
++    bt_mesh_r_mutex_create(&adv_buf_alloc_lock);
+ }
+ 
+ #if CONFIG_BLE_MESH_DEINIT

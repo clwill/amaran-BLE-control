@@ -690,6 +690,19 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_init());
     }
 
+    /* LOCAL EDIT #11 (2026-09-28): restore the adv-alloc lock A/B switch
+     * before the mesh stack starts allocating. Absent key = OFF. */
+    {
+        nvs_handle_t h;
+        uint8_t on = 0;
+        if (nvs_open("amaran", NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_u8(h, "adv_lock", &on);
+            nvs_close(h);
+        }
+        amaran_adv_lock_set(on != 0);
+        ESP_LOGW(TAG, "adv alloc lock %s (from NVS)", on ? "ON" : "OFF");
+    }
+
     /* Bluedroid init (BLE Mesh sits on top). */
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));

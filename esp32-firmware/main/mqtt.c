@@ -57,6 +57,9 @@ static int32_t  s_first_comp_err;      /* first non-zero code since boot */
 static int64_t  s_first_comp_err_us;   /* ...and when (esp_timer time) */
 static uint16_t s_last_comp_err_dst;   /* destination of the last failure */
 static int16_t  s_adv_buf_min = -1;    /* lowest adv pool free count seen */
+
+/* LOCAL EDIT #11 (2026-09-28) -- adv-alloc race experiment. See mqtt.h. */
+extern volatile bool amaran_adv_alloc_lock_on;  /* IDF patch 0002, adv.c */
 /* Optimistic at boot: the mesh is almost always fine, and the poll sweep
  * downgrades us within MESH_SILENT_SWEEPS_OFFLINE sweeps if it isn't. Starting
  * "offline" would make every restart flap the entities to unavailable. */
@@ -305,6 +308,10 @@ static const diag_sensor_t DIAG_SENSORS[] = {
     { "comp_err_last_dst",     "Mesh last error destination",  NULL, NULL, NULL,               "mdi:target" },
     { "adv_buf_free",          "Mesh adv buffers free",        NULL, NULL, "measurement",      "mdi:tray-full" },
     { "adv_buf_min",           "Mesh adv buffers min free",    NULL, NULL, "measurement",      "mdi:tray-minus" },
+    /* LOCAL EDIT #11 (2026-09-28) */
+    { "adv_buf_ref0",          "Mesh adv buffers truly free",  NULL, NULL, "measurement",      "mdi:tray-full" },
+    { "adv_buf_ghost",         "Mesh adv buffer ghosts",       NULL, NULL, "measurement",      "mdi:ghost-outline" },
+    { "adv_lock",              "Mesh adv alloc lock",          NULL, NULL, "measurement",      "mdi:lock-outline" },
 };
 #define DIAG_SENSOR_COUNT (sizeof(DIAG_SENSORS) / sizeof(DIAG_SENSORS[0]))
 
@@ -867,6 +874,33 @@ static int16_t adv_buf_free(void)
     return adv_buf_pool.avail_count;
 }
 
+/* LOCAL EDIT #11: buffers that are actually free (ref == 0), counted
+ * directly. avail_count is the pool's bookkeeping; this is the ground truth.
+ * A true leak (a ref never dropped) moves both down together. The suspected
+ * alloc race leaves the buffer free but the count decremented, so the gap
+ * ("ghosts") grows instead. Unlocked read of 60 bytes -- a sample can be off
+ * by one mid-transfer, the trend cannot. */
+static int16_t adv_buf_ref0(void)
+{
+    int16_t n = 0;
+    for (int i = 0; i < adv_buf_pool.buf_count; i++) {
+        if (adv_buf_pool.__bufs[i].ref == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+void amaran_adv_lock_set(bool on)
+{
+    amaran_adv_alloc_lock_on = on;
+}
+
+bool amaran_adv_lock_get(void)
+{
+    return amaran_adv_alloc_lock_on;
+}
+
 void amaran_mqtt_note_mesh_send_comp(int err_code, uint16_t dst)
 {
     s_mesh_send_comp++;
@@ -907,6 +941,10 @@ void amaran_mqtt_add_tx_diag(cJSON *obj)
     cJSON_AddNumberToObject(obj, "adv_buf_free", adv_buf_free());
     cJSON_AddNumberToObject(obj, "adv_buf_min", s_adv_buf_min);
     cJSON_AddNumberToObject(obj, "adv_buf_total", adv_buf_pool.buf_count);
+    int16_t ref0 = adv_buf_ref0();                      /* LOCAL EDIT #11 */
+    cJSON_AddNumberToObject(obj, "adv_buf_ref0", ref0);
+    cJSON_AddNumberToObject(obj, "adv_buf_ghost", ref0 - adv_buf_free());
+    cJSON_AddNumberToObject(obj, "adv_lock", amaran_adv_alloc_lock_on ? 1 : 0);
 }
 
 void amaran_mqtt_mesh_tx_stats(uint32_t *tx, uint32_t *tx_err,
