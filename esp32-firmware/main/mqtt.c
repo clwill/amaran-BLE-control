@@ -57,9 +57,6 @@ static int32_t  s_first_comp_err;      /* first non-zero code since boot */
 static int64_t  s_first_comp_err_us;   /* ...and when (esp_timer time) */
 static uint16_t s_last_comp_err_dst;   /* destination of the last failure */
 static int16_t  s_adv_buf_min = -1;    /* lowest adv pool free count seen */
-
-/* LOCAL EDIT #11 (2026-09-28) -- adv-alloc race experiment. See mqtt.h. */
-extern volatile bool amaran_adv_alloc_lock_on;  /* IDF patch 0002, adv.c */
 /* Optimistic at boot: the mesh is almost always fine, and the poll sweep
  * downgrades us within MESH_SILENT_SWEEPS_OFFLINE sweeps if it isn't. Starting
  * "offline" would make every restart flap the entities to unavailable. */
@@ -311,7 +308,6 @@ static const diag_sensor_t DIAG_SENSORS[] = {
     /* LOCAL EDIT #11 (2026-09-28) */
     { "adv_buf_ref0",          "Mesh adv buffers truly free",  NULL, NULL, "measurement",      "mdi:tray-full" },
     { "adv_buf_ghost",         "Mesh adv buffer ghosts",       NULL, NULL, "measurement",      "mdi:ghost-outline" },
-    { "adv_lock",              "Mesh adv alloc lock",          NULL, NULL, "measurement",      "mdi:lock-outline" },
 };
 #define DIAG_SENSOR_COUNT (sizeof(DIAG_SENSORS) / sizeof(DIAG_SENSORS[0]))
 
@@ -891,16 +887,6 @@ static int16_t adv_buf_ref0(void)
     return n;
 }
 
-void amaran_adv_lock_set(bool on)
-{
-    amaran_adv_alloc_lock_on = on;
-}
-
-bool amaran_adv_lock_get(void)
-{
-    return amaran_adv_alloc_lock_on;
-}
-
 void amaran_mqtt_note_mesh_send_comp(int err_code, uint16_t dst)
 {
     s_mesh_send_comp++;
@@ -944,7 +930,6 @@ void amaran_mqtt_add_tx_diag(cJSON *obj)
     int16_t ref0 = adv_buf_ref0();                      /* LOCAL EDIT #11 */
     cJSON_AddNumberToObject(obj, "adv_buf_ref0", ref0);
     cJSON_AddNumberToObject(obj, "adv_buf_ghost", ref0 - adv_buf_free());
-    cJSON_AddNumberToObject(obj, "adv_lock", amaran_adv_alloc_lock_on ? 1 : 0);
 }
 
 void amaran_mqtt_mesh_tx_stats(uint32_t *tx, uint32_t *tx_err,

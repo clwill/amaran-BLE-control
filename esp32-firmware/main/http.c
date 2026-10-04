@@ -10,7 +10,6 @@
 #include "esp_heap_caps.h"   /* LOCAL EDIT #8: fragmentation check */
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "nvs.h"            /* LOCAL EDIT #11: adv_lock persistence */
 
 #include "mesh_config.h"
 #include "wifi.h"
@@ -379,37 +378,6 @@ static esp_err_t simulate_deaf_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, body);
 }
 
-/* LOCAL EDIT #11 (2026-09-28) -- POST /adv_lock?on=0|1. Flips the IDF
- * adv-alloc lock at runtime and persists it in NVS (namespace "amaran", key
- * "adv_lock") so it survives the recovery automation's reboots. POST-only. */
-static esp_err_t adv_lock_post(httpd_req_t *req)
-{
-    char query[32], val[8];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
-        httpd_query_key_value(query, "on", val, sizeof(val)) != ESP_OK ||
-        (val[0] != '0' && val[0] != '1')) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"need ?on=0|1\"}");
-    }
-    bool on = (val[0] == '1');
-    amaran_adv_lock_set(on);
-
-    bool persisted = false;
-    nvs_handle_t h;
-    if (nvs_open("amaran", NVS_READWRITE, &h) == ESP_OK) {
-        persisted = (nvs_set_u8(h, "adv_lock", on ? 1 : 0) == ESP_OK &&
-                     nvs_commit(h) == ESP_OK);
-        nvs_close(h);
-    }
-    ESP_LOGW(TAG, "adv alloc lock -> %s (persisted=%d)", on ? "ON" : "OFF", persisted);
-
-    char body[80];
-    snprintf(body, sizeof(body), "{\"ok\":true,\"adv_lock\":%d,\"persisted\":%s}",
-             amaran_adv_lock_get() ? 1 : 0, persisted ? "true" : "false");
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, body);
-}
-
 static esp_err_t reboot_post(httpd_req_t *req)
 {
     static esp_timer_handle_t s_reboot_timer;
@@ -488,12 +456,6 @@ int amaran_http_start(const amaran_mqtt_dispatch_t *dispatch)
         .method = HTTP_POST,
         .handler = reboot_post,
     };
-    static const httpd_uri_t r_adv_lock = {    /* LOCAL EDIT #11 (2026-09-28) */
-        .uri = "/adv_lock",
-        .method = HTTP_POST,
-        .handler = adv_lock_post,
-    };
-    httpd_register_uri_handler(s_server, &r_adv_lock);
     httpd_register_uri_handler(s_server, &r_sim_deaf);
     httpd_register_uri_handler(s_server, &r_list);
     httpd_register_uri_handler(s_server, &r_post);
