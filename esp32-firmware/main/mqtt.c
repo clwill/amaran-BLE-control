@@ -1027,8 +1027,21 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     }
 }
 
+static bool s_started;      /* LOCAL EDIT #12 (2026-10-23, #35): start once */
+
 int amaran_mqtt_start(const amaran_mqtt_dispatch_t *dispatch)
 {
+    /* LOCAL EDIT #12: on_wifi_ip() fires on every IP_EVENT_STA_GOT_IP, i.e. every
+     * AP reconnect. Without this guard each reconnect created another esp-mqtt
+     * client with the same client-id, and the broker logged "session taken
+     * over" every 4-6 s as they evicted each other (37k connects in 2 days).
+     * esp-mqtt reconnects by itself after a TCP drop, so a second start is
+     * never needed. */
+    if (s_started) {
+        ESP_LOGW(TAG, "mqtt already started; ignoring repeat start (wifi reconnect)");
+        return 0;
+    }
+    s_started = true;
     s_dispatch = dispatch;
 
     for (int i = 0; i < AMARAN_LIGHT_COUNT; i++) {

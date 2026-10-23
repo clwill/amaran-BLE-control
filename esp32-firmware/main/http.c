@@ -415,6 +415,10 @@ static esp_err_t reboot_post(httpd_req_t *req)
 
 int amaran_http_start(const amaran_mqtt_dispatch_t *dispatch)
 {
+    if (s_server != NULL) {     /* LOCAL EDIT #12 (2026-10-23, #35): start once */
+        ESP_LOGW(TAG, "http already started; ignoring repeat start (wifi reconnect)");
+        return 0;
+    }
     s_dispatch = dispatch;
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
